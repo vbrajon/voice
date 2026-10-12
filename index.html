@@ -55,6 +55,7 @@
   const API = q.get('api') || 'https://automated-anytime-choices-pressed.trycloudflare.com'
   // room relay: `bun relay.ts`
   const RELAY = q.get('relay') || 'wss://latinas-serves-talks-puts.trycloudflare.com'
+  const ROOM = location.hash.slice(1) || 'lobby'
   const LANGS = { en: 'English', cs: 'Czech', fr: 'French', es: 'Spanish', de: 'German', it: 'Italian', pt: 'Portuguese', pl: 'Polish', ja: 'Japanese', zh: 'Chinese', ko: 'Korean', ru: 'Russian', ar: 'Arabic', hi: 'Hindi' }
   const me = { lang: localStorage.lang || (navigator.language.slice(0, 2) in LANGS ? navigator.language.slice(0, 2) : 'en') }
 
