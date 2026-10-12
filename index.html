@@ -136,8 +136,10 @@
     const ctx = new AudioContext()
     const ws = new WebSocket(API.replace(/^http/, 'ws') + '/v1/audio/transcriptions/realtime')
     ws.onopen = () => ws.send(JSON.stringify({ type: 'session.update', session: { sample_rate: ctx.sampleRate, language: me.lang } }))
+    ws.onclose = e => { if (mic?.ws === ws) { stop(); note(`ASR socket closed (${e.code})`) } }
     ws.onmessage = e => {
       const ev = JSON.parse(e.data)
+      if (ev.type === 'error') return note(ev.error?.message ?? e.data)
       if (ev.type.endsWith('.delta') && ev.delta) {
         live ??= { id: crypto.randomUUID(), text: '', lang: me.lang, partial: true }
         live.text += ev.delta
@@ -151,12 +153,12 @@
     let speaking = false, quiet = 0
     const proc = ctx.createScriptProcessor(4096, 1, 1)
     proc.onaudioprocess = e => {
+      if (ws.readyState !== 1) return
       const f = e.inputBuffer.getChannelData(0)
       let sum = 0
       for (const v of f) sum += v * v
       if (Math.sqrt(sum / f.length) > 0.01) { speaking = true; quiet = 0 }
       else if (speaking && (quiet += f.length / ctx.sampleRate) > 0.8) { speaking = false; ws.send(JSON.stringify({ type: 'input_audio_buffer.commit' })) }
-      if (ws.readyState !== 1) return
       const pcm = new Int16Array(f.length)
       for (let i = 0; i < f.length; i++) pcm[i] = Math.max(-1, Math.min(1, f[i])) * 32767
       ws.send(pcm)
@@ -169,13 +171,15 @@
   }
 
   function stop() {
-    if (mic.ws.readyState === 1) mic.ws.send(JSON.stringify({ type: 'input_audio_buffer.commit' }))
-    setTimeout(() => mic.ws.close(), 2000)
-    mic.stream.getTracks().forEach(t => t.stop())
-    mic.ctx.close()
+    const { ws, stream, ctx } = mic
     mic = null
+    if (ws.readyState === 1) { ws.send(JSON.stringify({ type: 'input_audio_buffer.commit' })); setTimeout(() => ws.close(), 2000) }
+    stream.getTracks().forEach(t => t.stop())
+    ctx.close()
     $('mic').className = ''
   }
+
+  function note(text) { $('room').textContent = `#${ROOM} · ${text}`; console.warn(text) }
 
   async function pickDevice() {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
