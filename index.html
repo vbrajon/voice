@@ -7,10 +7,12 @@
   html, body { height: 100% }
   body { font: 16px/1.4 system-ui, sans-serif; background: #111; color: #eee; display: flex; flex-direction: column }
   #status { position: fixed; inset: 0; display: grid; place-items: center; background: #111; z-index: 2; text-align: center; padding: 1rem; white-space: pre-wrap }
+  #bar { display: flex; gap: .5rem; padding: .5rem; align-items: center; border-bottom: 1px solid #333 }
+  #bar select, #text { padding: .4rem; background: #222; color: #eee; border: 1px solid #444; border-radius: .3rem }
+  #bar span { color: #888; margin-left: auto }
   #mic { flex: 1; display: grid; place-items: center; background: none; border: 0; color: #eee; cursor: pointer }
   #mic svg { width: 40vmin; height: 40vmin; transition: .2s }
   #mic.rec svg { color: #e33; animation: pulse 1s infinite alternate }
-  #mic.busy { opacity: .4; pointer-events: none }
   @keyframes pulse { to { transform: scale(1.1) } }
   body.chat #mic { flex: 0 0 6rem }
   body.chat #mic svg { width: 4rem; height: 4rem }
@@ -20,16 +22,18 @@
   #devices button { display: block; width: 100%; text-align: left; padding: .6rem; margin: .3rem 0; background: #333; border: 0; color: #eee; border-radius: .3rem; cursor: pointer }
   #chat { display: none; flex: 1; flex-direction: column; min-height: 0 }
   body.chat #chat { display: flex }
-  #bar { display: flex; gap: .5rem; padding: .5rem; align-items: center; border-bottom: 1px solid #333 }
-  #bar select, #bar button, #text { padding: .4rem; background: #222; color: #eee; border: 1px solid #444; border-radius: .3rem }
   #log { flex: 1; overflow: auto; padding: .5rem }
   #log p { background: #222; padding: .5rem .8rem; border-radius: .6rem; margin: .4rem 0; max-width: 40rem }
-  #log small { display: block; color: #9c9; margin-top: .2rem }
+  #log p.partial { color: #aaa; font-style: italic }
+  #log p.mine { margin-left: auto; background: #253 }
+  #log small { display: block; color: #888; margin-top: .2rem }
   form { display: flex; gap: .5rem; padding: .5rem; border-top: 1px solid #333 }
   #text { flex: 1 }
 </style>
 
 <div id="status">Connecting…</div>
+
+<div id="bar">I speak <select id="lang"></select><span id="room"></span></div>
 
 <button id="mic" title="Click to talk">
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
@@ -40,23 +44,23 @@
 <div id="devices"><div>Choose a microphone</div></div>
 
 <div id="chat">
-  <div id="bar">
-    <select id="from"></select> → <select id="to"></select>
-    <button id="translate">Translate</button>
-    <span id="mt"></span>
-  </div>
   <div id="log"></div>
   <form id="form"><input id="text" placeholder="Type a message…" autocomplete="off"><button>Send</button></form>
 </div>
 
 <script type="module">
   const $ = id => document.getElementById(id)
-  // nemo-speech server: `nemo-speech serve --asr-model nemotron-3.5 --nmt-model riva-translate-4b-instruct-v2.q8_0.gguf --cors-origin https://vbrajon.github.io`
-  const API = new URLSearchParams(location.search).get('api') || 'https://guitars-jimmy-bicycle-interested.trycloudflare.com'
+  const q = new URLSearchParams(location.search)
+  // nemo-speech: `nemo-speech serve --asr-model nemotron-3.5 --nmt-model riva-translate-4b-instruct-v2.q8_0.gguf --cors-origin https://vbrajon.github.io`
+  const API = q.get('api') || 'https://guitars-jimmy-bicycle-interested.trycloudflare.com'
+  // room relay: `bun relay.ts`
+  const RELAY = q.get('relay') || 'wss://elementary-seas-reporters-dried.trycloudflare.com'
+  const ROOM = location.hash.slice(1) || 'lobby'
   const LANGS = { en: 'English', cs: 'Czech', fr: 'French', es: 'Spanish', de: 'German', it: 'Italian', pt: 'Portuguese', pl: 'Polish', ja: 'Japanese', zh: 'Chinese', ko: 'Korean', ru: 'Russian', ar: 'Arabic', hi: 'Hindi' }
+  const me = { lang: localStorage.lang || (navigator.language.slice(0, 2) in LANGS ? navigator.language.slice(0, 2) : 'en') }
 
   async function api(path, body) {
-    const init = body instanceof FormData ? { method: 'POST', body } : body ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}
+    const init = body ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}
     const json = await (await fetch(API + path, init)).json()
     if (json.error) throw new Error(json.error.message)
     return json
@@ -71,48 +75,106 @@
     $('status').textContent = `Can't reach ${API} (${e.message})\n\nStart it with:\nnemo-speech serve --asr-model nemotron-3.5 --cors-origin ${location.origin}`
   }
 
-  // 2. Fullscreen mic: pick a device, then toggle recording
-  let deviceId, recorder
-  $('mic').onclick = async () => {
-    if (recorder) return recorder.stop()
-    if (!deviceId) return pickDevice()
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: { exact: deviceId } } })
-    const chunks = []
-    recorder = new MediaRecorder(stream)
-    recorder.ondataavailable = e => chunks.push(e.data)
-    recorder.onstop = async () => {
-      stream.getTracks().forEach(t => t.stop())
-      recorder = null
-      $('mic').className = 'busy'
-      try {
-        const ctx = new AudioContext({ sampleRate: 16000 })
-        const buf = await ctx.decodeAudioData(await new Blob(chunks).arrayBuffer())
-        const form = new FormData()
-        form.append('file', wav(buf.getChannelData(0)), 'audio.wav')
-        form.append('language', 'auto')
-        form.append('response_format', 'verbose_json')
-        const { text, language } = await api('/v1/audio/transcriptions', form)
-        if (language?.slice(0, 2) in LANGS) $('from').value = language.slice(0, 2)
-        if (text.trim()) say(text.trim())
-      } catch (e) {
-        console.warn(e)
-      }
-      $('mic').className = ''
+  for (const [code, name] of Object.entries(LANGS)) $('lang').add(new Option(name, code))
+  $('lang').value = me.lang
+  $('lang').onchange = () => { me.lang = localStorage.lang = $('lang').value; if (mic) stop(); localize([...$('log').children]) }
+  $('room').textContent = '#' + ROOM
+
+  // 2. Shared room: every message is {id, text, lang, partial?}; each viewer renders it in their own language
+  const relay = new WebSocket(`${RELAY}/${ROOM}`)
+  relay.onmessage = e => show(JSON.parse(e.data))
+  const seen = new Map()
+
+  function post(m) { show({ ...m, mine: true }); relay.send(JSON.stringify(m)) }
+
+  function show(m) {
+    let p = seen.get(m.id)
+    if (!m.text.trim()) return p?.remove()
+    if (!p) {
+      p = $('log').appendChild(document.createElement('p'))
+      p.dataset.lang = m.lang
+      seen.set(m.id, p)
     }
-    recorder.start()
+    document.body.className = 'chat'
+    p.className = (m.partial ? 'partial ' : '') + (m.mine ? 'mine' : '')
+    p.dataset.text = p.textContent = m.text
+    p.scrollIntoView()
+    if (!m.partial) localize([p])
+  }
+
+  // Riva Translate only knows en↔X pairs: pivot through English otherwise
+  async function translate(texts, from, to) {
+    if (from === to) return texts
+    if (from !== 'en' && to !== 'en') { texts = await translate(texts, from, 'en'); from = 'en' }
+    const { translations } = await api('/v1/translations', { input: texts, source_language: from, target_language: to })
+    return translations.map(t => t.text)
+  }
+
+  async function localize(ps) {
+    const groups = Map.groupBy(ps.filter(p => !p.classList.contains('partial')), p => p.dataset.lang)
+    for (const [lang, group] of groups) {
+      const out = lang === me.lang ? group.map(p => p.dataset.text) : await translate(group.map(p => p.dataset.text), lang, me.lang)
+      group.forEach((p, i) => {
+        p.textContent = out[i]
+        if (lang !== me.lang) p.appendChild(document.createElement('small')).textContent = p.dataset.text
+      })
+    }
+  }
+
+  $('form').onsubmit = e => {
+    e.preventDefault()
+    if ($('text').value.trim()) post({ id: crypto.randomUUID(), text: $('text').value.trim(), lang: me.lang })
+    $('text').value = ''
+  }
+
+  // 3. Live mic: stream PCM16 to the ASR websocket, show deltas as they come, commit an utterance after 0.8 s of silence
+  let deviceId, mic, live
+  $('mic').onclick = () => mic ? stop() : deviceId ? start() : pickDevice()
+
+  async function start() {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: { exact: deviceId } } })
+    const ctx = new AudioContext()
+    const ws = new WebSocket(API.replace(/^http/, 'ws') + '/v1/audio/transcriptions/realtime')
+    ws.onopen = () => ws.send(JSON.stringify({ type: 'session.update', session: { sample_rate: ctx.sampleRate, language: me.lang } }))
+    ws.onmessage = e => {
+      const ev = JSON.parse(e.data)
+      if (ev.type.endsWith('.delta') && ev.delta) {
+        live ??= { id: crypto.randomUUID(), text: '', lang: me.lang, partial: true }
+        live.text += ev.delta
+        post(live)
+      }
+      if (ev.type.endsWith('.completed') && live) {
+        post({ id: live.id, text: ev.transcript, lang: me.lang })
+        live = null
+      }
+    }
+    let speaking = false, quiet = 0
+    const proc = ctx.createScriptProcessor(4096, 1, 1)
+    proc.onaudioprocess = e => {
+      const f = e.inputBuffer.getChannelData(0)
+      let sum = 0
+      for (const v of f) sum += v * v
+      if (Math.sqrt(sum / f.length) > 0.01) { speaking = true; quiet = 0 }
+      else if (speaking && (quiet += f.length / ctx.sampleRate) > 0.8) { speaking = false; ws.send(JSON.stringify({ type: 'input_audio_buffer.commit' })) }
+      if (ws.readyState !== 1) return
+      const pcm = new Int16Array(f.length)
+      for (let i = 0; i < f.length; i++) pcm[i] = Math.max(-1, Math.min(1, f[i])) * 32767
+      ws.send(pcm)
+    }
+    const mute = ctx.createGain()
+    mute.gain.value = 0
+    ctx.createMediaStreamSource(stream).connect(proc).connect(mute).connect(ctx.destination)
+    mic = { stream, ctx, ws }
     $('mic').className = 'rec'
   }
 
-  // 16 kHz mono PCM16 WAV, the only upload format the server accepts
-  function wav(f32) {
-    const b = new DataView(new ArrayBuffer(44 + f32.length * 2))
-    const tag = (o, s) => [...s].forEach((c, i) => b.setUint8(o + i, c.charCodeAt(0)))
-    tag(0, 'RIFF'); b.setUint32(4, 36 + f32.length * 2, true); tag(8, 'WAVE')
-    tag(12, 'fmt '); b.setUint32(16, 16, true); b.setUint16(20, 1, true); b.setUint16(22, 1, true)
-    b.setUint32(24, 16000, true); b.setUint32(28, 32000, true); b.setUint16(32, 2, true); b.setUint16(34, 16, true)
-    tag(36, 'data'); b.setUint32(40, f32.length * 2, true)
-    f32.forEach((v, i) => b.setInt16(44 + i * 2, Math.max(-1, Math.min(1, v)) * 32767, true))
-    return new Blob([b], { type: 'audio/wav' })
+  function stop() {
+    if (mic.ws.readyState === 1) mic.ws.send(JSON.stringify({ type: 'input_audio_buffer.commit' }))
+    setTimeout(() => mic.ws.close(), 2000)
+    mic.stream.getTracks().forEach(t => t.stop())
+    mic.ctx.close()
+    mic = null
+    $('mic').className = ''
   }
 
   async function pickDevice() {
@@ -123,47 +185,8 @@
       if (d.kind !== 'audioinput') continue
       const b = box.appendChild(document.createElement('button'))
       b.textContent = d.label || d.deviceId
-      b.onclick = () => { deviceId = d.deviceId; $('devices').remove(); $('mic').click() }
+      b.onclick = () => { deviceId = d.deviceId; $('devices').remove(); start() }
     }
     $('devices').className = 'open'
-  }
-
-  // 3. Chat with whole-conversation translation
-  function say(text) {
-    document.body.className = 'chat'
-    const p = $('log').appendChild(document.createElement('p'))
-    p.textContent = text
-    p.scrollIntoView()
-  }
-
-  $('form').onsubmit = e => { e.preventDefault(); if ($('text').value.trim()) say($('text').value.trim()); $('text').value = '' }
-
-  for (const [code, name] of Object.entries(LANGS)) {
-    $('from').add(new Option(name, code))
-    $('to').add(new Option(name, code))
-  }
-  $('to').value = 'fr'
-
-  // Riva Translate only knows en↔X pairs: pivot through English otherwise
-  async function translate(texts, from, to) {
-    if (from === to) return texts
-    if (from !== 'en' && to !== 'en') { texts = await translate(texts, from, 'en'); from = 'en' }
-    const { translations } = await api('/v1/translations', { input: texts, source_language: from, target_language: to })
-    return translations.map(t => t.text)
-  }
-
-  $('translate').onclick = async () => {
-    $('mt').textContent = 'Translating…'
-    try {
-      const ps = [...$('log').children]
-      const out = await translate(ps.map(p => p.firstChild.textContent), $('from').value, $('to').value)
-      ps.forEach((p, i) => {
-        p.querySelector('small')?.remove()
-        p.appendChild(document.createElement('small')).textContent = out[i]
-      })
-      $('mt').textContent = ''
-    } catch (e) {
-      $('mt').textContent = e.message
-    }
   }
 </script>
