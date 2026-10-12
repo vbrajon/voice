@@ -1,0 +1,156 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Voice</title>
+<style>
+  * { box-sizing: border-box; margin: 0 }
+  html, body { height: 100% }
+  body { font: 16px/1.4 system-ui, sans-serif; background: #111; color: #eee; display: flex; flex-direction: column }
+  #status { position: fixed; inset: 0; display: grid; place-items: center; background: #111; z-index: 2; text-align: center; padding: 1rem }
+  #status progress { display: block; width: 16rem; margin: 1rem auto 0 }
+  #mic { flex: 1; display: grid; place-items: center; background: none; border: 0; color: #eee; cursor: pointer }
+  #mic svg { width: 40vmin; height: 40vmin; transition: .2s }
+  #mic.rec svg { color: #e33; animation: pulse 1s infinite alternate }
+  #mic.busy { opacity: .4; pointer-events: none }
+  @keyframes pulse { to { transform: scale(1.1) } }
+  body.chat #mic { flex: 0 0 6rem }
+  body.chat #mic svg { width: 4rem; height: 4rem }
+  #devices { position: fixed; inset: 0; display: none; place-items: center; background: #000c; z-index: 1 }
+  #devices.open { display: grid }
+  #devices div { background: #222; padding: 1rem; border-radius: .5rem; min-width: 18rem }
+  #devices button { display: block; width: 100%; text-align: left; padding: .6rem; margin: .3rem 0; background: #333; border: 0; color: #eee; border-radius: .3rem; cursor: pointer }
+  #chat { display: none; flex: 1; flex-direction: column; min-height: 0 }
+  body.chat #chat { display: flex }
+  #bar { display: flex; gap: .5rem; padding: .5rem; align-items: center; border-bottom: 1px solid #333 }
+  #bar select, #bar button, #text { padding: .4rem; background: #222; color: #eee; border: 1px solid #444; border-radius: .3rem }
+  #log { flex: 1; overflow: auto; padding: .5rem }
+  #log p { background: #222; padding: .5rem .8rem; border-radius: .6rem; margin: .4rem 0; max-width: 40rem }
+  #log small { display: block; color: #9c9; margin-top: .2rem }
+  form { display: flex; gap: .5rem; padding: .5rem; border-top: 1px solid #333 }
+  #text { flex: 1 }
+</style>
+
+<div id="status">Loading…</div>
+
+<button id="mic" title="Click to talk">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+    <rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v4M8 21h8"/>
+  </svg>
+</button>
+
+<div id="devices"><div>Choose a microphone</div></div>
+
+<div id="chat">
+  <div id="bar">
+    <select id="from"></select> → <select id="to"></select>
+    <button id="translate">Translate</button>
+    <span id="mt"></span>
+  </div>
+  <div id="log"></div>
+  <form id="form"><input id="text" placeholder="Type a message…" autocomplete="off"><button>Send</button></form>
+</div>
+
+<script type="module">
+  import { AutoProcessor, AutoTokenizer, ParakeetForCTC } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.1'
+
+  const $ = id => document.getElementById(id)
+  const MODEL = 'onnx-community/parakeet-ctc-0.6b-ONNX'
+  const LANGS = { en: 'English', fr: 'French', es: 'Spanish', de: 'German', it: 'Italian', pt: 'Portuguese', ja: 'Japanese', zh: 'Chinese', ko: 'Korean', ru: 'Russian', ar: 'Arabic', hi: 'Hindi' }
+
+  // 1. Download the voice model on entry
+  const files = {}
+  const progress_callback = p => {
+    if (p.status !== 'progress') return
+    files[p.file] = [p.loaded, p.total]
+    const [loaded, total] = Object.values(files).reduce((a, b) => [a[0] + b[0], a[1] + b[1]], [0, 0])
+    $('status').innerHTML = `Downloading ${MODEL}<br>${(loaded / 1e6).toFixed(0)} / ${(total / 1e6).toFixed(0)} MB<progress value="${loaded}" max="${total}"></progress>`
+  }
+  const [processor, tokenizer, model] = await Promise.all([
+    AutoProcessor.from_pretrained(MODEL),
+    AutoTokenizer.from_pretrained(MODEL),
+    ParakeetForCTC.from_pretrained(MODEL, { dtype: 'q8', progress_callback }),
+  ])
+  $('status').remove()
+
+  // Greedy CTC: argmax per frame, collapse repeats, decode drops <pad> blanks
+  async function transcribe(audio) {
+    const { logits } = await model(await processor(audio))
+    const ids = []
+    for (const frame of logits[0]) {
+      let best = 0
+      for (let i = 1; i < frame.data.length; i++) if (frame.data[i] > frame.data[best]) best = i
+      if (best !== ids.at(-1)) ids.push(best)
+    }
+    return tokenizer.decode(ids, { skip_special_tokens: true }).trim()
+  }
+
+  // 2. Fullscreen mic: pick a device, then toggle recording
+  let deviceId, recorder
+  $('mic').onclick = async () => {
+    if (recorder) return recorder.stop()
+    if (!deviceId) return pickDevice()
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: { exact: deviceId } } })
+    const chunks = []
+    recorder = new MediaRecorder(stream)
+    recorder.ondataavailable = e => chunks.push(e.data)
+    recorder.onstop = async () => {
+      stream.getTracks().forEach(t => t.stop())
+      recorder = null
+      $('mic').className = 'busy'
+      const ctx = new AudioContext({ sampleRate: 16000 })
+      const buf = await ctx.decodeAudioData(await new Blob(chunks).arrayBuffer())
+      const text = await transcribe(buf.getChannelData(0))
+      $('mic').className = ''
+      if (text) say(text)
+    }
+    recorder.start()
+    $('mic').className = 'rec'
+  }
+
+  async function pickDevice() {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    stream.getTracks().forEach(t => t.stop())
+    const box = $('devices').firstElementChild
+    for (const d of await navigator.mediaDevices.enumerateDevices()) {
+      if (d.kind !== 'audioinput') continue
+      const b = box.appendChild(document.createElement('button'))
+      b.textContent = d.label || d.deviceId
+      b.onclick = () => { deviceId = d.deviceId; $('devices').remove(); $('mic').click() }
+    }
+    $('devices').className = 'open'
+  }
+
+  // 3. Chat with whole-conversation translation
+  function say(text) {
+    document.body.className = 'chat'
+    const p = $('log').appendChild(document.createElement('p'))
+    p.textContent = text
+    p.scrollIntoView()
+  }
+
+  $('form').onsubmit = e => { e.preventDefault(); if ($('text').value.trim()) say($('text').value.trim()); $('text').value = '' }
+
+  for (const [code, name] of Object.entries(LANGS)) {
+    $('from').add(new Option(name, code))
+    $('to').add(new Option(name, code))
+  }
+  $('to').value = 'fr'
+
+  $('translate').onclick = async () => {
+    if (!('Translator' in self)) return $('mt').textContent = 'Translator API unavailable (Chrome 138+)'
+    $('mt').textContent = 'Loading…'
+    try {
+      const translator = await Translator.create({
+        sourceLanguage: $('from').value, targetLanguage: $('to').value,
+        monitor: m => m.addEventListener('downloadprogress', e => $('mt').textContent = `Language pack ${(e.loaded * 100).toFixed(0)}%`),
+      })
+      for (const p of $('log').children) {
+        p.querySelector('small')?.remove()
+        p.appendChild(document.createElement('small')).textContent = await translator.translate(p.firstChild.textContent)
+      }
+      $('mt').textContent = ''
+    } catch (e) {
+      $('mt').textContent = e.message
+    }
+  }
+</script>
