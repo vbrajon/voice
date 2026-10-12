@@ -6,8 +6,7 @@
   * { box-sizing: border-box; margin: 0 }
   html, body { height: 100% }
   body { font: 16px/1.4 system-ui, sans-serif; background: #111; color: #eee; display: flex; flex-direction: column }
-  #status { position: fixed; inset: 0; display: grid; place-items: center; background: #111; z-index: 2; text-align: center; padding: 1rem }
-  #status progress { display: block; width: 16rem; margin: 1rem auto 0 }
+  #status { position: fixed; inset: 0; display: grid; place-items: center; background: #111; z-index: 2; text-align: center; padding: 1rem; white-space: pre-wrap }
   #mic { flex: 1; display: grid; place-items: center; background: none; border: 0; color: #eee; cursor: pointer }
   #mic svg { width: 40vmin; height: 40vmin; transition: .2s }
   #mic.rec svg { color: #e33; animation: pulse 1s infinite alternate }
@@ -30,7 +29,7 @@
   #text { flex: 1 }
 </style>
 
-<div id="status">Loading…</div>
+<div id="status">Connecting…</div>
 
 <button id="mic" title="Click to talk">
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
@@ -51,37 +50,24 @@
 </div>
 
 <script type="module">
-  import { AutoProcessor, AutoTokenizer, ParakeetForCTC } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.1'
-
   const $ = id => document.getElementById(id)
-  const MODEL = 'onnx-community/parakeet-ctc-0.6b-ONNX'
-  const LANGS = { en: 'English', cs: 'Czech', fr: 'French', es: 'Spanish', de: 'German', it: 'Italian', pt: 'Portuguese', pl: 'Polish', ja: 'Japanese', zh: 'Chinese', ko: 'Korean', ru: 'Russian', ar: 'Arabic', hi: 'Hindi' }
+  // nemo-speech server: `nemo-speech serve --asr-model nemotron-3.5 --nmt-model riva-translate-4b-instruct-v2.q8_0.gguf --cors-origin https://vbrajon.github.io`
+  const API = new URLSearchParams(location.search).get('api') || 'https://guitars-jimmy-bicycle-interested.trycloudflare.com'
 
-  // 1. Download the voice model on entry
-  const files = {}
-  const progress_callback = p => {
-    if (p.status !== 'progress') return
-    files[p.file] = [p.loaded, p.total]
-    const [loaded, total] = Object.values(files).reduce((a, b) => [a[0] + b[0], a[1] + b[1]], [0, 0])
-    $('status').innerHTML = `Downloading ${MODEL}<br>${(loaded / 1e6).toFixed(0)} / ${(total / 1e6).toFixed(0)} MB<progress value="${loaded}" max="${total}"></progress>`
+  async function api(path, body) {
+    const init = body instanceof FormData ? { method: 'POST', body } : body ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}
+    const json = await (await fetch(API + path, init)).json()
+    if (json.error) throw new Error(json.error.message)
+    return json
   }
-  const [processor, tokenizer, model] = await Promise.all([
-    AutoProcessor.from_pretrained(MODEL),
-    AutoTokenizer.from_pretrained(MODEL),
-    ParakeetForCTC.from_pretrained(MODEL, { dtype: 'q8', progress_callback }),
-  ])
-  $('status').remove()
 
-  // Greedy CTC: argmax per frame, collapse repeats, decode drops <pad> blanks
-  async function transcribe(audio) {
-    const { logits } = await model(await processor(audio))
-    const ids = []
-    for (const frame of logits[0]) {
-      let best = 0
-      for (let i = 1; i < frame.data.length; i++) if (frame.data[i] > frame.data[best]) best = i
-      if (best !== ids.at(-1)) ids.push(best)
-    }
-    return tokenizer.decode(ids, { skip_special_tokens: true }).trim()
+  // 1. On entry: check the server has the voice model loaded
+  try {
+    const { data } = await api('/v1/models')
+    if (!data.some(m => m.capability === 'transcription')) throw new Error('no ASR model loaded')
+    $('status').remove()
+  } catch (e) {
+    $('status').textContent = `Can't reach ${API} (${e.message})\n\nStart it with:\nnemo-speech serve --asr-model nemotron-3.5 --cors-origin ${location.origin}`
   }
 
   // 2. Fullscreen mic: pick a device, then toggle recording
@@ -100,8 +86,13 @@
       try {
         const ctx = new AudioContext({ sampleRate: 16000 })
         const buf = await ctx.decodeAudioData(await new Blob(chunks).arrayBuffer())
-        const text = await transcribe(buf.getChannelData(0))
-        if (text) say(text)
+        const form = new FormData()
+        form.append('file', wav(buf.getChannelData(0)), 'audio.wav')
+        form.append('language', 'auto')
+        form.append('response_format', 'verbose_json')
+        const { text, language } = await api('/v1/audio/transcriptions', form)
+        if (language?.slice(0, 2) in LANGS) $('from').value = language.slice(0, 2)
+        if (text.trim()) say(text.trim())
       } catch (e) {
         console.warn(e)
       }
@@ -109,6 +100,18 @@
     }
     recorder.start()
     $('mic').className = 'rec'
+  }
+
+  // 16 kHz mono PCM16 WAV, the only upload format the server accepts
+  function wav(f32) {
+    const b = new DataView(new ArrayBuffer(44 + f32.length * 2))
+    const tag = (o, s) => [...s].forEach((c, i) => b.setUint8(o + i, c.charCodeAt(0)))
+    tag(0, 'RIFF'); b.setUint32(4, 36 + f32.length * 2, true); tag(8, 'WAVE')
+    tag(12, 'fmt '); b.setUint32(16, 16, true); b.setUint16(20, 1, true); b.setUint16(22, 1, true)
+    b.setUint32(24, 16000, true); b.setUint32(28, 32000, true); b.setUint16(32, 2, true); b.setUint16(34, 16, true)
+    tag(36, 'data'); b.setUint32(40, f32.length * 2, true)
+    f32.forEach((v, i) => b.setInt16(44 + i * 2, Math.max(-1, Math.min(1, v)) * 32767, true))
+    return new Blob([b], { type: 'audio/wav' })
   }
 
   async function pickDevice() {
@@ -140,18 +143,23 @@
   }
   $('to').value = 'fr'
 
+  // Riva Translate only knows en↔X pairs: pivot through English otherwise
+  async function translate(texts, from, to) {
+    if (from === to) return texts
+    if (from !== 'en' && to !== 'en') { texts = await translate(texts, from, 'en'); from = 'en' }
+    const { translations } = await api('/v1/translations', { input: texts, source_language: from, target_language: to })
+    return translations.map(t => t.text)
+  }
+
   $('translate').onclick = async () => {
-    if (!('Translator' in self)) return $('mt').textContent = 'Translator API unavailable (Chrome 138+)'
-    $('mt').textContent = 'Loading…'
+    $('mt').textContent = 'Translating…'
     try {
-      const translator = await Translator.create({
-        sourceLanguage: $('from').value, targetLanguage: $('to').value,
-        monitor: m => m.addEventListener('downloadprogress', e => $('mt').textContent = `Language pack ${(e.loaded * 100).toFixed(0)}%`),
-      })
-      for (const p of $('log').children) {
+      const ps = [...$('log').children]
+      const out = await translate(ps.map(p => p.firstChild.textContent), $('from').value, $('to').value)
+      ps.forEach((p, i) => {
         p.querySelector('small')?.remove()
-        p.appendChild(document.createElement('small')).textContent = await translator.translate(p.firstChild.textContent)
-      }
+        p.appendChild(document.createElement('small')).textContent = out[i]
+      })
       $('mt').textContent = ''
     } catch (e) {
       $('mt').textContent = e.message
