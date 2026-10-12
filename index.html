@@ -97,11 +97,15 @@
       stream.getTracks().forEach(t => t.stop())
       recorder = null
       $('mic').className = 'busy'
-      const ctx = new AudioContext({ sampleRate: 16000 })
-      const buf = await ctx.decodeAudioData(await new Blob(chunks).arrayBuffer())
-      const text = await transcribe(buf.getChannelData(0))
+      try {
+        const ctx = new AudioContext({ sampleRate: 16000 })
+        const buf = await ctx.decodeAudioData(await new Blob(chunks).arrayBuffer())
+        const text = await transcribe(buf.getChannelData(0))
+        if (text) say(text)
+      } catch (e) {
+        console.warn(e)
+      }
       $('mic').className = ''
-      if (text) say(text)
     }
     recorder.start()
     $('mic').className = 'rec'
