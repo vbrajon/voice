@@ -53,6 +53,7 @@
   const $ = id => document.getElementById(id)
   // nemo-speech server: `nemo-speech serve --asr-model nemotron-3.5 --nmt-model riva-translate-4b-instruct-v2.q8_0.gguf --cors-origin https://vbrajon.github.io`
   const API = new URLSearchParams(location.search).get('api') || 'https://guitars-jimmy-bicycle-interested.trycloudflare.com'
+  const LANGS = { en: 'English', cs: 'Czech', fr: 'French', es: 'Spanish', de: 'German', it: 'Italian', pt: 'Portuguese', pl: 'Polish', ja: 'Japanese', zh: 'Chinese', ko: 'Korean', ru: 'Russian', ar: 'Arabic', hi: 'Hindi' }
 
   async function api(path, body) {
     const init = body instanceof FormData ? { method: 'POST', body } : body ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}
