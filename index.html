@@ -52,9 +52,9 @@
   const $ = id => document.getElementById(id)
   const q = new URLSearchParams(location.search)
   // nemo-speech: `nemo-speech serve --asr-model nemotron-3.5 --nmt-model riva-translate-4b-instruct-v2.q8_0.gguf --cors-origin https://vbrajon.github.io`
-  const API = q.get('api') || 'https://automated-anytime-choices-pressed.trycloudflare.com'
+  const API = q.get('api') || 'https://uses-itunes-island-mandate.trycloudflare.com'
   // room relay: `bun relay.ts`
-  const RELAY = q.get('relay') || 'wss://latinas-serves-talks-puts.trycloudflare.com'
+  const RELAY = q.get('relay') || 'wss://experimental-witnesses-flip-annotation.trycloudflare.com'
   const ROOM = location.hash.slice(1) || 'lobby'
   const LANGS = { en: 'English', cs: 'Czech', fr: 'French', es: 'Spanish', de: 'German', it: 'Italian', pt: 'Portuguese', pl: 'Polish', ja: 'Japanese', zh: 'Chinese', ko: 'Korean', ru: 'Russian', ar: 'Arabic', hi: 'Hindi' }
   const me = { lang: localStorage.lang || (navigator.language.slice(0, 2) in LANGS ? navigator.language.slice(0, 2) : 'en') }
@@ -137,9 +137,13 @@
     const ws = new WebSocket(API.replace(/^http/, 'ws') + '/v1/audio/transcriptions/realtime')
     ws.onopen = () => ws.send(JSON.stringify({ type: 'session.update', session: { sample_rate: ctx.sampleRate, language: me.lang } }))
     ws.onclose = e => { if (mic?.ws === ws) { stop(); note(`ASR socket closed (${e.code})`) } }
+    // Frames captured before the session is configured are queued, then flushed: first words are never lost
+    let queue = []
+    const send = msg => queue ? queue.push(msg) : ws.send(msg)
     ws.onmessage = e => {
       const ev = JSON.parse(e.data)
       if (ev.type === 'error') return note(ev.error?.message ?? e.data)
+      if (ev.type === 'session.updated') { queue.forEach(m => ws.send(m)); queue = null }
       if (ev.type.endsWith('.delta') && ev.delta) {
         live ??= { id: crypto.randomUUID(), text: '', lang: me.lang, partial: true }
         live.text += ev.delta
@@ -153,15 +157,14 @@
     let speaking = false, quiet = 0
     const proc = ctx.createScriptProcessor(4096, 1, 1)
     proc.onaudioprocess = e => {
-      if (ws.readyState !== 1) return
       const f = e.inputBuffer.getChannelData(0)
       let sum = 0
       for (const v of f) sum += v * v
       if (Math.sqrt(sum / f.length) > 0.01) { speaking = true; quiet = 0 }
-      else if (speaking && (quiet += f.length / ctx.sampleRate) > 0.8) { speaking = false; ws.send(JSON.stringify({ type: 'input_audio_buffer.commit' })) }
+      else if (speaking && (quiet += f.length / ctx.sampleRate) > 0.8) { speaking = false; send(JSON.stringify({ type: 'input_audio_buffer.commit' })) }
       const pcm = new Int16Array(f.length)
       for (let i = 0; i < f.length; i++) pcm[i] = Math.max(-1, Math.min(1, f[i])) * 32767
-      ws.send(pcm)
+      send(pcm)
     }
     const mute = ctx.createGain()
     mute.gain.value = 0
@@ -173,7 +176,7 @@
   function stop() {
     const { ws, stream, ctx } = mic
     mic = null
-    if (ws.readyState === 1) { ws.send(JSON.stringify({ type: 'input_audio_buffer.commit' })); setTimeout(() => ws.close(), 2000) }
+    if (ws.readyState === 1) { ws.send(JSON.stringify({ type: 'input_audio_buffer.commit' })); setTimeout(() => ws.close(), 2000) } else ws.close()
     stream.getTracks().forEach(t => t.stop())
     ctx.close()
     $('mic').className = ''
