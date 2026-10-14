@@ -52,9 +52,9 @@
   const $ = id => document.getElementById(id)
   const q = new URLSearchParams(location.search)
   // nemo-speech: `nemo-speech serve --asr-model nemotron-3.5 --nmt-model riva-translate-4b-instruct-v2.q8_0.gguf --cors-origin https://vbrajon.github.io`
-  const API = q.get('api') || 'https://uses-itunes-island-mandate.trycloudflare.com'
+  const API = q.get('api') || 'https://voice-api.past.app'
   // room relay: `bun relay.ts`
-  const RELAY = q.get('relay') || 'wss://experimental-witnesses-flip-annotation.trycloudflare.com'
+  const RELAY = q.get('relay') || 'wss://voice-relay.past.app'
   const ROOM = location.hash.slice(1) || 'lobby'
   const LANGS = { en: 'English', cs: 'Czech', fr: 'French', es: 'Spanish', de: 'German', it: 'Italian', pt: 'Portuguese', pl: 'Polish', ja: 'Japanese', zh: 'Chinese', ko: 'Korean', ru: 'Russian', ar: 'Arabic', hi: 'Hindi' }
   const me = { lang: localStorage.lang || (navigator.language.slice(0, 2) in LANGS ? navigator.language.slice(0, 2) : 'en') }
